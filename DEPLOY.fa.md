@@ -44,7 +44,7 @@ bash infra/ec2-user-data.sh   # بعد از clone کردن ریپو در قدم 
 
 ## ۴) آوردن کد و تنظیم `.env`
 ```bash
-git clone https://github.com/rzashakeri/file-from-link.git
+git clone https://github.com/file-from-link/file-from-link.git
 cd file-from-link
 cp .env.example .env
 nano .env

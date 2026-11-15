@@ -14,7 +14,7 @@ apt-get update -y
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 systemctl enable --now docker
 usermod -aG docker ubuntu || true
-[ -d /opt/file-from-link ] || git clone https://github.com/rzashakeri/file-from-link.git /opt/file-from-link
+[ -d /opt/file-from-link ] || git clone https://github.com/file-from-link/file-from-link.git /opt/file-from-link
 cd /opt/file-from-link
 if [ ! -f .env ]; then
   cp .env.example .env

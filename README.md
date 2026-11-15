@@ -34,7 +34,7 @@ happens on EC2.
 ## Quick start (EC2, Mode A)
 
 ```bash
-git clone https://github.com/rzashakeri/file-from-link.git
+git clone https://github.com/file-from-link/file-from-link.git
 cd file-from-link
 cp .env.example .env   # fill BOT_TOKEN + API_SECRET
 docker compose up -d --build
