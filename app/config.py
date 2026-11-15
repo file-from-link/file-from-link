@@ -24,6 +24,10 @@ FILE_TTL_HOURS = int(os.environ.get("FILE_TTL_HOURS","24"))
 S3_BUCKET = os.environ.get("S3_BUCKET","")
 AWS_REGION = os.environ.get("AWS_REGION","eu-central-1")
 COOKIES_FILE = os.environ.get("YTDLP_COOKIES_FILE","")
+# YouTube cookies, round-robin (2026-11-15): five burner-account exports
+# in YT_COOKIES_DIR as yt-1..5.txt, one per request, cycling in order.
+# Empty/missing directory = the single COOKIES_FILE fallback as before.
+YT_COOKIES_DIR = os.environ.get("YT_COOKIES_DIR", "/data/yt_cookies")
 IG_COOKIES_FILE = os.environ.get("IG_COOKIES_FILE","")
 X_COOKIES_FILE = os.environ.get("X_COOKIES_FILE","")
 MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", str(1900*1000*1000)))  # 1.9GB cap (Reza, 2026-10-28): Telegram local-API ceiling is 2000MB, this leaves margin

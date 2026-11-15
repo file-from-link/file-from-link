@@ -5,19 +5,85 @@ Mitigations built in, tried in order:
   1. PO Tokens from the bgutil provider sidecar (docker service pot-provider)
      via the bgutil-ytdlp-pot-provider plugin.
   2. Optional cookies file (YTDLP_COOKIES_FILE) — used only if the file exists.
+     YouTube rotates round-robin over yt-*.txt in YT_COOKIES_DIR (2026-11-15):
+     five burner-account exports, one per request, so no single account
+     carries the whole load.
   3. Fallback player clients (tv, web_safari, ios) retried automatically.
   4. curl-cffi impersonation ("chrome") on every yt-dlp call, so
      Cloudflare-fronted sites see a browser TLS fingerprint, not Python
      urllib; retries raised to 10 (+10 fragment retries) for flaky links.
 """
 from pathlib import Path
+import itertools
 import shutil
+import threading
 import yt_dlp
-from .config import DOWNLOAD_DIR, COOKIES_FILE, IG_COOKIES_FILE, X_COOKIES_FILE, JOB_TIMEOUT, POT_BASE_URL, PROXY, MAX_FILE_BYTES
+from .config import DOWNLOAD_DIR, COOKIES_FILE, IG_COOKIES_FILE, X_COOKIES_FILE, JOB_TIMEOUT, POT_BASE_URL, PROXY, MAX_FILE_BYTES, YT_COOKIES_DIR
 from . import cobalt as _cobalt
 from .utils import format_selector, is_spotify, is_apple_music, classify_url, IMAGE_EXTS, FILE_EXTS
 class DownloadError(Exception): pass
 BOT_WALL_MARKERS = ("not a bot", "sign in to confirm", "po token", "potoken", "needs to be reloaded", "requested format is not available")
+_YT_SESSION_COOKIES = {"SID", "__Secure-1PSID", "__Secure-3PSID"}
+_YT_COOKIE_LOCK = threading.Lock()
+_YT_COOKIE_FILES = None  # last usable file list the cycle was built from
+_YT_COOKIE_CYCLE = None  # itertools.cycle over _YT_COOKIE_FILES
+_YT_COOKIE_SEEN = {}  # path -> (mtime_ns, size, usable)
+
+def _yt_cookie_usable(path: Path) -> bool:
+    """A cookie file is usable only if it carries a full session (SID +
+    __Secure-1PSID + __Secure-3PSID). A partial export — e.g. one with no
+    SID at all — would make every request with it look logged-out, so it
+    is skipped and never poisons the rotation. The verdict is cached per
+    (mtime, size) so a refresh of the file is picked up automatically."""
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    key = (st.st_mtime_ns, st.st_size)
+    cached = _YT_COOKIE_SEEN.get(path)
+    if cached and cached[:2] == key:
+        return cached[2]
+    try:
+        names = {l.split("\t")[5] for l in path.read_text().splitlines()
+                 if l and not l.startswith("#") and l.count("\t") >= 6}
+    except OSError:
+        names = set()
+    usable = _YT_SESSION_COOKIES <= names
+    _YT_COOKIE_SEEN[path] = (*key, usable)
+    return usable
+
+def _yt_cookie_files() -> list:
+    """Usable YouTube cookie files in rotation order (yt-*.txt, sorted).
+    Falls back to the single COOKIES_FILE when the directory holds
+    nothing usable, and to [] when there is no cookie at all."""
+    d = Path(YT_COOKIES_DIR)
+    try:
+        names = sorted(p.name for p in d.iterdir()
+                       if p.name.startswith("yt-") and p.suffix == ".txt")
+    except OSError:
+        names = []
+    files = [d / n for n in names if _yt_cookie_usable(d / n)]
+    if files:
+        return files
+    if COOKIES_FILE and Path(COOKIES_FILE).exists():
+        return [Path(COOKIES_FILE)]
+    return []
+
+def _next_yt_cookie() -> Path | None:
+    """Next YouTube cookie file, round-robin: consecutive calls return
+    consecutive files, cycling 1..N, 1..N. Each worker process keeps its
+    own cycle, so the accounts share the load evenly in aggregate. The
+    cycle is rebuilt when the usable file set changes (a refresh or a
+    newly added export), without a restart."""
+    global _YT_COOKIE_FILES, _YT_COOKIE_CYCLE
+    files = _yt_cookie_files()
+    if not files:
+        return None
+    with _YT_COOKIE_LOCK:
+        if _YT_COOKIE_FILES != files:
+            _YT_COOKIE_FILES = files
+            _YT_COOKIE_CYCLE = itertools.cycle(files)
+        return next(_YT_COOKIE_CYCLE)
 FALLBACK_CLIENTS = ["tv", "ios", "web_safari"]
 def _build_opts(choice, job_id, on_progress, player_client=None, url: str = '', force_best=False):
     out = str(DOWNLOAD_DIR / job_id / "%(title).80s.%(ext)s")
@@ -50,6 +116,12 @@ def _build_opts(choice, job_id, on_progress, player_client=None, url: str = '', 
         opts["cookiefile"] = IG_COOKIES_FILE
     elif ("x.com" in url or "twitter.com" in url) and X_COOKIES_FILE and Path(X_COOKIES_FILE).exists():
         opts["cookiefile"] = X_COOKIES_FILE
+    elif "youtu" in url:
+        # YouTube: round-robin over the burner-account exports (2026-11-15);
+        # _next_yt_cookie falls back to the single COOKIES_FILE itself.
+        cookie = _next_yt_cookie()
+        if cookie is not None:
+            opts["cookiefile"] = str(cookie)
     elif COOKIES_FILE and Path(COOKIES_FILE).exists():
         opts["cookiefile"] = COOKIES_FILE
     if choice in ("audiohq", "audio", "audiolow"):
