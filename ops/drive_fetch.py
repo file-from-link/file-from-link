@@ -7,8 +7,16 @@ no restart):
     /opt/ffl-drive/venv/bin/python3 ops/drive_fetch.py <folder-id> [/data/yt_cookies]
 
 Staging: the owner drops yt-1..5.txt exports into the "File From Link
-cookies" Drive folder (same user OAuth token as the nightly backup
-uploader — see ops/drive_upload.py, whose auth helpers are reused here).
+cookies" Drive folder. The folder is shared (Reader) with the project's
+service account file-from-link-backup@... — the fetch reads through the
+SA, NOT the user token: the user token carries only the drive.file scope
+(ops/drive_upload.py), which sees solely files the app itself created,
+so owner-dropped files are invisible to it (verified 2026-11-15: both
+the cookies folder and the backups folder 404 for that token, while a
+list still shows the 5 backup files the app created). A service account
+needs no consent flow, so this script mints its token with the
+drive.readonly scope instead, which can read anything shared with it.
+SA key: /opt/ffl-secrets/drive-sa.json (FFL_DRIVE_SA_KEY).
 Each file is written mode 600 and validated: Netscape format + a full
 session (SID + __Secure-1PSID + __Secure-3PSID). A partial export is
 still fetched but reported PARTIAL — the downloader skips partial files
@@ -21,10 +29,24 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from drive_upload import build_service  # noqa: E402  (same-dir script, __main__-guarded)
+SA_KEY_PATH = Path(os.environ.get("FFL_DRIVE_SA_KEY", "/opt/ffl-secrets/drive-sa.json"))
+SA_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 SESSION_COOKIES = {"SID", "__Secure-1PSID", "__Secure-3PSID"}
+
+
+def build_service():
+    """Drive client authenticated as the project's service account with
+    the readonly scope (see module docstring for why the user token
+    cannot do this fetch). Raises FileNotFoundError when the key is
+    missing on the host."""
+    if not SA_KEY_PATH.exists():
+        raise FileNotFoundError(f"service-account key not found: {SA_KEY_PATH}")
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    creds = service_account.Credentials.from_service_account_file(
+        str(SA_KEY_PATH), scopes=SA_SCOPES)
+    return build("drive", "v3", credentials=creds)
 
 
 def validate_cookie_file(path: Path) -> tuple:
