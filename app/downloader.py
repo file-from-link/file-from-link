@@ -309,10 +309,10 @@ def _download_ytdlp_once(url: str, choice: str, job_id: str, on_progress=None, f
             msg = str(e).lower()
             if client is not attempts[-1] and any(m in msg for m in BOT_WALL_MARKERS):
                 continue  # bot wall -> try the next player client
-            raise DownloadError(str(e)[:500]) from e
+            raise DownloadError(str(e)[:500] or f"{type(e).__name__} (no message)") from e
     raise DownloadError("This file is larger than the 1 GB limit."
                         if last_error and ("max-filesize" in str(last_error) or "larger than" in str(last_error))
-                        else (str(last_error)[:500] if last_error else "download failed"))
+                        else ((str(last_error)[:500] or f"{type(last_error).__name__} (no message)") if last_error else "download failed"))
 
 def get_direct_url(url: str, choice: str) -> str | None:
     """Best-effort fresh direct stream URL from the source (signed, expiring,

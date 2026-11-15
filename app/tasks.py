@@ -12,6 +12,14 @@ from .i18n import t as tr
 from .utils import is_spotify, is_apple_music
 from .cleanup import sweep_public
 log = logging.getLogger(__name__)
+def _err_text(e: BaseException) -> str:
+    """Error text for the DB and the user message. Some exceptions carry
+    no message at all (str(e) == '' — e.g. a bare DownloadError('')), and
+    those were being recorded as a blank failure nobody could diagnose
+    (2026-11-15: ~4,720 empty-error failures). Fall back to the exception
+    type name so a failure is never blank."""
+    s = str(e)
+    return s if s else f"{type(e).__name__} (no message)"
 def process_job(job_id: str, status_message_id: int | None = None):
     sweep_public()
     job = db.get_job(job_id)
@@ -73,11 +81,14 @@ def process_job(job_id: str, status_message_id: int | None = None):
             else:
                 edit_text(chat_id, status_message_id, tr(lang, "done", title=meta.get("title","")), reply_markup={"inline_keyboard": buttons})
     except DownloadError as e:
-        db.update_job(job_id, status="failed", error=str(e))
-        if status_message_id and kind == "widget": set_status(chat_id, status_message_id, kind, "failed", tr(lang, "failed", error=str(e)))
-        send_text(chat_id, tr(lang, "failed", error=str(e)))
+        log.error("job %s failed (DownloadError): %r", job_id, e)
+        err = _err_text(e)
+        db.update_job(job_id, status="failed", error=err)
+        if status_message_id and kind == "widget": set_status(chat_id, status_message_id, kind, "failed", tr(lang, "failed", error=err))
+        send_text(chat_id, tr(lang, "failed", error=err))
     except Exception as e:
-        db.update_job(job_id, status="failed", error=str(e)[:500])
+        log.error("job %s failed (%s): %r", job_id, type(e).__name__, e)
+        db.update_job(job_id, status="failed", error=_err_text(e)[:500])
         if status_message_id and kind == "widget": set_status(chat_id, status_message_id, kind, "failed", tr(lang, "failed_generic"))
         send_text(chat_id, tr(lang, "failed_generic"))
     finally:
@@ -103,7 +114,8 @@ def on_job_failure(rq_job, connection, exc_type, exc_value, tb):
         jid = rq_job.args[0]
         job = db.get_job(jid)
         if job and job["status"] not in ("done", "failed"):
-            reason = "timeout" if exc_type and "Timeout" in getattr(exc_type, "__name__", "") else str(exc_value)
+            reason = "timeout" if exc_type and "Timeout" in getattr(exc_type, "__name__", "") else (str(exc_value) or getattr(exc_type, "__name__", "") or "worker error")
+            log.error("rq job %s failed: %s: %r", jid, getattr(exc_type, "__name__", "?"), exc_value)
             _fail_and_notify(job, reason or "worker error")
     except Exception:
         pass
