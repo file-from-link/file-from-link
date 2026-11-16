@@ -50,7 +50,19 @@ import yt_dlp
 
 def test_build_opts_impersonation_and_retries():
     opts = dl._build_opts("720", "j1", None, url="https://example.com/v")
-    assert opts["impersonate"] == "chrome", opts
+    # 2026-11-16: a bare string here killed every download on yt-dlp
+    # 2026.10.26 (assert isinstance(target, ImpersonateTarget) at
+    # YoutubeDL construction) — the option must be an ImpersonateTarget
+    # whenever the class exists; the string is only the fallback for
+    # yt-dlp versions without it.
+    imp = opts["impersonate"]
+    assert str(imp) == "chrome", opts
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+    except ImportError:
+        ImpersonateTarget = None
+    if ImpersonateTarget is not None:
+        assert isinstance(imp, ImpersonateTarget), opts
     assert opts["retries"] == 10, opts
     assert opts["fragment_retries"] == 10, opts
     assert opts["format"] == "bv*[height<=720]+ba/b[height<=720]/bv*+ba/best/best", opts

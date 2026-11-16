@@ -105,7 +105,20 @@ def _build_opts(choice, job_id, on_progress, player_client=None, url: str = '', 
     }
     try:
         import curl_cffi  # noqa: F401 — present in requirements; if it is
-        opts["impersonate"] = "chrome"  # missing, yt-dlp falls back silently.
+        # missing, yt-dlp falls back silently.
+        # yt-dlp 2026.10.26 wants an ImpersonateTarget, NOT a bare string:
+        # YoutubeDL.__init__ passes the raw value to
+        # rh.is_supported_target(), which asserts
+        # isinstance(target, ImpersonateTarget) — a string kills EVERY
+        # download at construction, before any network request
+        # (2026-11-15: 766 'AssertionError (no message)' failures, all
+        # sites, median 0.5s). Older yt-dlp accepts the string, so it
+        # stays the fallback when the class is unavailable.
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            opts["impersonate"] = ImpersonateTarget.from_str("chrome")
+        except ImportError:
+            opts["impersonate"] = "chrome"
     except ImportError:
         pass  # no curl-cffi: plain urllib, as before (never break downloads).
     if PROXY:
