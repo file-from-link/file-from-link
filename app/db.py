@@ -1,5 +1,5 @@
 import sqlite3, time, uuid, json
-from .config import DATABASE_PATH
+from .config import DATABASE_PATH, FILE_CACHE_TTL_SECONDS
 def _c():
     con = sqlite3.connect(DATABASE_PATH); con.row_factory = sqlite3.Row; return con
 def init():
@@ -23,6 +23,12 @@ def init():
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created)")
         con.execute("""CREATE TABLE IF NOT EXISTS inline_tokens(
           token TEXT PRIMARY KEY, url TEXT, created REAL)""")
+        con.execute("""CREATE TABLE IF NOT EXISTS file_cache(
+          url TEXT, fmt TEXT, file_id TEXT, kind TEXT,
+          filesize INTEGER, title TEXT, description TEXT,
+          has_video INTEGER DEFAULT 0, duration REAL,
+          created REAL, updated REAL,
+          PRIMARY KEY (url, fmt))""")
 init()
 def create_job(chat_id, user_id, url, fmt, lang="en", status_message_id=None, status_kind="text"):
     jid = uuid.uuid4().hex[:12]; now = time.time()
@@ -110,3 +116,32 @@ def take_inline_token(token):
         r = con.execute("SELECT url FROM inline_tokens WHERE token=?", (token,)).fetchone()
         if r: con.execute("DELETE FROM inline_tokens WHERE token=?", (token,))
     return r["url"] if r else None
+
+# --- file_id cache (2026-11-20) -------------------------------------------
+# A file already delivered to Telegram for a given (url, fmt) can be
+# re-sent by file_id: no download, no upload, no egress. The key is the
+# *effective* URL actually downloaded (Spotify/Apple links resolve to a
+# YouTube URL first) plus the exact quality/format, since a different
+# fmt is a different file. A send that fails with a bad-file_id error
+# must delete the row so the next request re-downloads instead of
+# looping on the dead id (see tasks._is_bad_file_id).
+def lookup_file_cache(url, fmt):
+    """The cached row for (url, fmt), or None on miss/expiry."""
+    cutoff = time.time() - FILE_CACHE_TTL_SECONDS
+    with _c() as con:
+        r = con.execute("SELECT * FROM file_cache WHERE url=? AND fmt=? AND created>?",
+                        (url, fmt, cutoff)).fetchone()
+    return dict(r) if r else None
+def store_file_cache(url, fmt, file_id, kind, filesize, title, description, has_video, duration):
+    """Insert or replace the (url, fmt) row; expired rows are swept here."""
+    now = time.time()
+    with _c() as con:
+        con.execute("DELETE FROM file_cache WHERE created<?", (now - FILE_CACHE_TTL_SECONDS,))
+        con.execute("INSERT OR REPLACE INTO file_cache "
+                    "(url, fmt, file_id, kind, filesize, title, description, has_video, duration, created, updated) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (url, fmt, file_id, kind, filesize, title, description,
+                     1 if has_video else 0, duration, now, now))
+def delete_file_cache(url, fmt):
+    with _c() as con:
+        con.execute("DELETE FROM file_cache WHERE url=? AND fmt=?", (url, fmt))

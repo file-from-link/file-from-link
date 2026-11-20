@@ -21,6 +21,10 @@ MAX_JOBS_PER_USER = int(os.environ.get("MAX_JOBS_PER_USER","3"))
 # make the download faster. Still env-overridable via JOB_TIMEOUT_SECONDS.
 JOB_TIMEOUT = int(os.environ.get("JOB_TIMEOUT_SECONDS","3600"))
 FILE_TTL_HOURS = int(os.environ.get("FILE_TTL_HOURS","24"))
+# file_id cache (2026-11-20): a Telegram file_id already sent for a given
+# (url, fmt) can be re-sent with zero download and zero upload. Entries
+# older than this are treated as expired and pruned on the next store.
+FILE_CACHE_TTL_SECONDS = int(os.environ.get("FILE_CACHE_TTL_SECONDS", str(30*86400)))
 S3_BUCKET = os.environ.get("S3_BUCKET","")
 AWS_REGION = os.environ.get("AWS_REGION","eu-central-1")
 COOKIES_FILE = os.environ.get("YTDLP_COOKIES_FILE","")

@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 from . import db
 from .downloader import download, DownloadError, get_direct_url, resolve_stream_match
-from .sender import deliver, send_text, edit_text, edit_caption, send_document_file, copy_message, send_animation, tg
+from .sender import deliver, send_text, edit_text, edit_caption, send_document_file, copy_message, send_animation, send_file_id, result_file_id, tg
 from .widget import set_status
 from .gif import to_animation, to_gif, probe_video, CONVERT_MAX_SECONDS
 from .config import DOWNLOAD_DIR, TELEGRAM_LIMIT, JOB_TIMEOUT
@@ -20,6 +20,19 @@ def _err_text(e: BaseException) -> str:
     type name so a failure is never blank."""
     s = str(e)
     return s if s else f"{type(e).__name__} (no message)"
+def _is_bad_file_id(e: BaseException) -> bool:
+    """True when Telegram rejected a cached file_id (its file is gone or
+    the id was never valid). The description lives in the HTTP error's
+    JSON body, not in str(e), so both are checked. A match means the
+    cache row is dead: delete it and re-download instead of failing
+    the user for a stale id."""
+    text = str(e)
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        try: text += " " + str((resp.json() or {}).get("description") or "")
+        except Exception: pass
+    t = text.lower()
+    return any(m in t for m in ("file identifier", "file_id_invalid", "wrong file id", "invalid file id"))
 def process_job(job_id: str, status_message_id: int | None = None):
     sweep_public()
     job = db.get_job(job_id)
@@ -40,31 +53,66 @@ def process_job(job_id: str, status_message_id: int | None = None):
         if is_spotify(url) or is_apple_music(url):
             if status_message_id: set_status(chat_id, status_message_id, kind, "downloading", tr(lang, "matching"))
             url = resolve_stream_match(url)
-        path, meta = download(url, fmt, job_id, prog, lang)
-        if fmt == "gif":
-            try: path = to_animation(path, job_id)
-            except Exception: log.exception("gif animation conversion failed for job %s", job_id)  # fall back to the original video
-        elif fmt == "togif":
-            path = to_gif(path, job_id)  # no fallback: a failed conversion must fail the job, not silently deliver a video
-        db.update_job(job_id, status="uploading", title=meta.get("title",""), filepath=str(path), filesize=path.stat().st_size)
-        if status_message_id: set_status(chat_id, status_message_id, kind, "uploading", tr(lang, "uploading"))
-        if fmt in ("gif", "togif") and path.suffix.lower() in (".mp4", ".gif") and path.stat().st_size <= TELEGRAM_LIMIT:
-            send_animation(chat_id, path, f"{meta.get('title','')}\n{tr(lang, 'footer')}"[:1000])
-        else:
-            direct = None
-            if path.stat().st_size > TELEGRAM_LIMIT:
-                try: direct = get_direct_url(job["url"], fmt)
-                except Exception: direct = None
-            deliver(chat_id, path, meta.get("title",""), lang, direct)
+        # file_id cache (2026-11-20): a repeat of an already-delivered
+        # (url, fmt) is re-sent by file_id — no download, no upload.
+        # The key is the *effective* URL resolved above, not job["url"].
+        cached = db.lookup_file_cache(url, fmt)
+        path = None
+        meta = None
+        has_video, dur = False, None
+        if cached is not None:
+            try:
+                db.update_job(job_id, status="uploading", title=cached["title"] or "", filesize=cached["filesize"])
+                if status_message_id: set_status(chat_id, status_message_id, kind, "uploading", tr(lang, "uploading"))
+                send_file_id(chat_id, cached["kind"], cached["file_id"],
+                             f"{cached['title'] or ''}\n{tr(lang, 'footer')}"[:1000])
+                meta = {"title": cached["title"] or "", "description": cached.get("description") or "",
+                        "subtitles": [], "files": []}
+                has_video, dur = bool(cached["has_video"]), cached["duration"]
+            except Exception as e:
+                if _is_bad_file_id(e):
+                    log.warning("cached file_id dead for %s [%s], re-downloading", url, fmt)
+                    db.delete_file_cache(url, fmt)
+                    cached = None
+                else:
+                    raise
+        if cached is None:
+            path, meta = download(url, fmt, job_id, prog, lang)
+            if fmt == "gif":
+                try: path = to_animation(path, job_id)
+                except Exception: log.exception("gif animation conversion failed for job %s", job_id)  # fall back to the original video
+            elif fmt == "togif":
+                path = to_gif(path, job_id)  # no fallback: a failed conversion must fail the job, not silently deliver a video
+            db.update_job(job_id, status="uploading", title=meta.get("title",""), filepath=str(path), filesize=path.stat().st_size)
+            if status_message_id: set_status(chat_id, status_message_id, kind, "uploading", tr(lang, "uploading"))
+            send_kind, file_id = None, None
+            if fmt in ("gif", "togif") and path.suffix.lower() in (".mp4", ".gif") and path.stat().st_size <= TELEGRAM_LIMIT:
+                resp = send_animation(chat_id, path, f"{meta.get('title','')}\n{tr(lang, 'footer')}"[:1000])
+                send_kind, file_id = "animation", result_file_id(resp, "animation")
+            else:
+                direct = None
+                if path.stat().st_size > TELEGRAM_LIMIT:
+                    try: direct = get_direct_url(job["url"], fmt)
+                    except Exception: direct = None
+                send_kind, file_id = deliver(chat_id, path, meta.get("title",""), lang, direct)
+            if path.stat().st_size <= TELEGRAM_LIMIT:
+                has_video, dur = probe_video(path)
+            if file_id and send_kind in ("video", "audio", "document", "animation"):
+                try:
+                    db.store_file_cache(url, fmt, file_id, send_kind, path.stat().st_size,
+                                        meta.get("title", ""), meta.get("description") or "",
+                                        has_video, dur)
+                except Exception:
+                    log.exception("file_id cache store failed for job %s", job_id)  # never fail a delivered job over the cache
         for extra in (meta.get("files") or [])[1:]:
             try: deliver(chat_id, Path(extra), "", lang, None)
             except Exception: pass
         if fmt not in ("gif", "togif"): _deliver_extras(chat_id, job_id, meta, lang)
         db.update_job(job_id, status="done")
         buttons = [[{"text": tr(lang, "settings_button"), "callback_data": "set:open"}, {"text": tr(lang, "language_button"), "callback_data": "langmenu"}]]
-        if fmt != "togif" and path.stat().st_size <= TELEGRAM_LIMIT:
-            has_video, dur = probe_video(path)
-            if has_video and dur is not None and dur < CONVERT_MAX_SECONDS:
+        if fmt != "togif":
+            size_ok = (path.stat().st_size <= TELEGRAM_LIMIT) if path is not None else (cached["filesize"] <= TELEGRAM_LIMIT)
+            if size_ok and has_video and dur is not None and dur < CONVERT_MAX_SECONDS:
                 buttons.append([{"text": tr(lang, "convert_to_gif"), "callback_data": f"togif:{job_id}"}])
         if status_message_id:
             if kind == "widget":

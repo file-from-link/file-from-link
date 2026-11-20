@@ -87,7 +87,32 @@ def send_animation(chat_id, path: Path, caption: str = ""):
     extra = _probe_video(path)
     with path.open("rb") as f:
         return tg("sendAnimation", chat_id=chat_id, caption=caption[:1000], timeout=FILE_SEND_TIMEOUT, animation=(path.name, f), **extra)
-def deliver(chat_id, path: Path, title: str, lang: str = 'en', direct_url: str | None = None) -> str:
+def result_file_id(resp, kind):
+    """The file_id of a just-sent message, or None. Telegram puts it
+    under result[video|audio|document|animation|photo].file_id; photos
+    carry several sizes, the last is the largest."""
+    try:
+        r = (resp or {}).get("result") or {}
+        if kind == "photo":
+            photos = r.get("photo") or []
+            return photos[-1]["file_id"] if photos else None
+        return r[kind]["file_id"]
+    except Exception:
+        return None
+def send_file_id(chat_id, kind, file_id, caption: str = ""):
+    """Re-send a file Telegram already has, by file_id — no upload.
+    kind is one of video/audio/document/animation (the method it was
+    first sent with; a file_id is only reusable through its own kind)."""
+    method, field = {"video": ("sendVideo", "video"), "audio": ("sendAudio", "audio"),
+                     "document": ("sendDocument", "document"),
+                     "animation": ("sendAnimation", "animation")}[kind]
+    return tg(method, chat_id=chat_id, caption=caption[:1000],
+              timeout=FILE_SEND_TIMEOUT, **{field: file_id})
+def deliver(chat_id, path: Path, title: str, lang: str = 'en', direct_url: str | None = None):
+    """Send a finished file; returns (kind, file_id). kind is the media
+    kind (video/audio/document) when the file went to Telegram, or
+    's3-link'/'link' when it went out as a hosted link instead (then
+    file_id is None — nothing for the file_id cache to store)."""
     size = path.stat().st_size
     footer = tr(lang, "footer")
     if size <= TELEGRAM_LIMIT:
@@ -96,12 +121,13 @@ def deliver(chat_id, path: Path, title: str, lang: str = 'en', direct_url: str |
         is_audio = suffix in {".mp3",".m4a",".ogg",".opus",".flac"}
         method = "sendVideo" if is_video else ("sendAudio" if is_audio else "sendDocument")
         field = {"sendVideo": "video", "sendAudio": "audio", "sendDocument": "document"}[method]
+        kind = {"sendVideo": "video", "sendAudio": "audio", "sendDocument": "document"}[method]
         extra = _probe_video(path) if is_video else {}
         if extra: extra["supports_streaming"] = True
         caption = f"{title or path.name}\n{footer}"[:1000]
         with path.open("rb") as f:
-            tg(method, chat_id=chat_id, caption=caption, timeout=FILE_SEND_TIMEOUT, **extra, **{field:(path.name, f)})
-        return "file"
+            resp = tg(method, chat_id=chat_id, caption=caption, timeout=FILE_SEND_TIMEOUT, **extra, **{field:(path.name, f)})
+        return kind, result_file_id(resp, kind)
     if S3_BUCKET:
         import boto3
         key = f"{int(time.time())}-{secrets.token_hex(4)}/{path.name}"
@@ -111,7 +137,7 @@ def deliver(chat_id, path: Path, title: str, lang: str = 'en', direct_url: str |
         msg = tr(lang, "too_big", title=title, mb=size//1048576, hours=FILE_TTL_HOURS, url=url)
         if direct_url: msg += "\n" + tr(lang, "direct_link", url=direct_url)
         send_text(chat_id, msg + "\n" + footer)
-        return "s3-link"
+        return "s3-link", None
     token = secrets.token_hex(8); dest = PUBLIC_DIR/token; dest.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, dest/path.name)
     enc = urllib.parse.quote(path.name)
@@ -119,4 +145,4 @@ def deliver(chat_id, path: Path, title: str, lang: str = 'en', direct_url: str |
     msg = tr(lang, "too_big", title=title, mb=size//1048576, hours=FILE_TTL_HOURS, url=url)
     if direct_url: msg += "\n" + tr(lang, "direct_link", url=direct_url)
     send_text(chat_id, msg + "\n" + footer)
-    return "link"
+    return "link", None
