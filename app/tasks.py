@@ -66,6 +66,12 @@ def process_job(job_id: str, status_message_id: int | None = None):
                 if status_message_id: set_status(chat_id, status_message_id, kind, "uploading", tr(lang, "uploading"))
                 send_file_id(chat_id, cached["kind"], cached["file_id"],
                              f"{cached['title'] or ''}\n{tr(lang, 'footer')}"[:1000])
+                # Served from the file_id cache: record it so the
+                # dashboard can show a daily cache-hit rate. Set only
+                # here, after the send succeeded — a dead file_id takes
+                # the _is_bad_file_id path below and re-downloads, so
+                # its flag stays 0.
+                db.update_job(job_id, cache_hit=1)
                 meta = {"title": cached["title"] or "", "description": cached.get("description") or "",
                         "subtitles": [], "files": []}
                 has_video, dur = bool(cached["has_video"]), cached["duration"]

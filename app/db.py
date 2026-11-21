@@ -17,6 +17,8 @@ def init():
             con.execute("ALTER TABLE jobs ADD COLUMN status_message_id INTEGER")
         if "status_kind" not in cols:
             con.execute("ALTER TABLE jobs ADD COLUMN status_kind TEXT DEFAULT 'text'")
+        if "cache_hit" not in cols:
+            con.execute("ALTER TABLE jobs ADD COLUMN cache_hit INTEGER NOT NULL DEFAULT 0")
         ucols = [r[1] for r in con.execute("PRAGMA table_info(users)")]
         if "default_fmt" not in ucols:
             con.execute("ALTER TABLE users ADD COLUMN default_fmt TEXT")

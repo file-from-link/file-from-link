@@ -87,6 +87,41 @@ def test_delete_file_cache():
     assert db.lookup_file_cache(URL, "best") is None
 
 
+def test_cache_hit_column_exists_with_default_zero():
+    _reset()
+    cols = [r[1] for r in sqlite3.connect(os.environ["DATABASE_PATH"]).execute("PRAGMA table_info(jobs)")]
+    assert "cache_hit" in cols, cols
+    jid = db.create_job(1, 11, URL, "best", "en", None)
+    assert db.get_job(jid)["cache_hit"] == 0
+
+
+def test_migration_adds_cache_hit_to_old_jobs_table():
+    """A pre-existing jobs table (created before this change, no
+    cache_hit column) gains the column on init(), and its old rows
+    read back as 0."""
+    old_db = os.path.join(_tmp, "old-jobs.db")
+    con = sqlite3.connect(old_db)
+    con.execute("""CREATE TABLE jobs(
+      id TEXT PRIMARY KEY, chat_id INTEGER, user_id INTEGER, url TEXT,
+      fmt TEXT, status TEXT, title TEXT, filepath TEXT, filesize INTEGER,
+      error TEXT, created REAL, updated REAL)""")
+    con.execute("INSERT INTO jobs (id, chat_id, user_id, url, fmt, status, created, updated) "
+                "VALUES ('oldjob1', 1, 11, ?, 'best', 'done', 1, 1)", (URL,))
+    con.commit(); con.close()
+    prev = db.DATABASE_PATH
+    db.DATABASE_PATH = old_db
+    try:
+        db.init()
+        con = sqlite3.connect(old_db)
+        cols = [r[1] for r in con.execute("PRAGMA table_info(jobs)")]
+        row = con.execute("SELECT cache_hit FROM jobs WHERE id='oldjob1'").fetchone()
+        con.close()
+    finally:
+        db.DATABASE_PATH = prev
+    assert "cache_hit" in cols, cols
+    assert row is not None and row[0] == 0, row
+
+
 def test_result_file_id_extraction():
     assert result_file_id({"result": {"video": {"file_id": "V1"}}}, "video") == "V1"
     assert result_file_id({"result": {"audio": {"file_id": "A1"}}}, "audio") == "A1"
@@ -136,6 +171,7 @@ def test_cache_hit_skips_download_and_resends_by_file_id():
     calls_holder = []
     job, calls = _run_job({"download": _boom, "send_file_id": _send_file_id}, seed=_store)
     assert job["status"] == "done", job
+    assert job["cache_hit"] == 1, job
     assert calls_holder == [(1, "video", "FILEID1")], calls_holder
     assert not any("failed" in str(s).lower() for s in calls["sent"]), calls["sent"]
 
@@ -151,6 +187,7 @@ def test_cache_miss_downloads_and_stores():
         return "document", "NEWFILEID"
     job, calls = _run_job({"download": _download, "deliver": _deliver})
     assert job["status"] == "done", job
+    assert job["cache_hit"] == 0, job
     got = db.lookup_file_cache(URL, "best")
     assert got is not None and got["file_id"] == "NEWFILEID", got
     assert got["kind"] == "document" and got["title"] == "Fresh"
@@ -169,5 +206,6 @@ def test_dead_file_id_falls_back_to_download():
     job, calls = _run_job({"download": _download, "deliver": _deliver,
                            "send_file_id": _send_file_id}, seed=_store)
     assert job["status"] == "done", job
+    assert job["cache_hit"] == 0, job  # fell back to a download: not a cache hit
     got = db.lookup_file_cache(URL, "best")
     assert got is not None and got["file_id"] == "REPLACEDID", got
